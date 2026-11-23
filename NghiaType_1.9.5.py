@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-#FLM: NghiaType 1.9.5 - Kerning Studio (2026-11-20)
+#FLM: NghiaType 1.9.5 - Glyph Studio Integration (2026-11-22)
 """NghiaType Tools V3: consolidated Native and OpenType kerning workflow.
 
 PythonQt / FontLab 8 (FL9 support remains experimental).
@@ -22,10 +22,11 @@ import traceback
 import unicodedata
 
 
-PUBLIC_VERSION = "1.9.5"
+PUBLIC_VERSION = "1.9.5 | Unified Glyph Studio"
 RELEASE_DATE = "20.11.2026"
 SHELL_VERSION = PUBLIC_VERSION
 NATIVE_GUI_FILENAME = "NghiaType_Native_Kerning_V2_GUI_Alpha1.py"
+GLYPH_ENGINE_FILENAME = "NghiaType_GlyphStudio_Unified_UI_Engine.py"
 OT_V1_CORE_FILENAME = "FontLab_Vietnamese_Kerning_Assistant_v1.py"
 CROSSCHECK_FILENAME = "NghiaType_Kerning_Crosscheck_V3_Alpha0_11.py"
 OT_SYNC_FILENAME = "NghiaType_OT_Sync_Preview_V3_Alpha0_12.py"
@@ -300,6 +301,42 @@ def load_exact_ot_writer_module(path):
 
 
 def start_gui(fontlab, QtCore, QtGui):
+    class CompactBar(QtGui.QFrame):
+        """Visible title/restore strip; drag it to move the compact window."""
+        def __init__(self, owner):
+            QtGui.QFrame.__init__(self, owner)
+            self.owner = owner
+            self.drag_offset = None
+
+        def mousePressEvent(self, event):
+            if read_qt_value(event, 'button') == QtCore.Qt.LeftButton:
+                try:
+                    global_point = read_qt_value(event, 'globalPos')
+                    window_rect = read_qt_value(self.owner, 'frameGeometry')
+                    origin = read_qt_value(window_rect, 'topLeft')
+                    self.drag_offset = global_point - origin
+                    event.accept()
+                    return
+                except Exception:
+                    self.drag_offset = None
+            QtGui.QFrame.mousePressEvent(self, event)
+
+        def mouseMoveEvent(self, event):
+            if self.drag_offset is not None and (
+                read_qt_value(event, 'buttons', 0) & QtCore.Qt.LeftButton
+            ):
+                try:
+                    self.owner.move(read_qt_value(event, 'globalPos') - self.drag_offset)
+                    event.accept()
+                    return
+                except Exception:
+                    pass
+            QtGui.QFrame.mouseMoveEvent(self, event)
+
+        def mouseReleaseEvent(self, event):
+            self.drag_offset = None
+            QtGui.QFrame.mouseReleaseEvent(self, event)
+
     class ToolsShell(QtGui.QDialog):
         def __init__(self, parent=None):
             QtGui.QDialog.__init__(self, parent)
@@ -320,7 +357,9 @@ def start_gui(fontlab, QtCore, QtGui):
             self.resize(window_width, window_height)
             try:
                 self.setWindowFlags(
-                    self.windowFlags() & ~QtCore.Qt.WindowContextHelpButtonHint
+                    (self.windowFlags() & ~QtCore.Qt.WindowContextHelpButtonHint)
+                    | QtCore.Qt.WindowSystemMenuHint
+                    | QtCore.Qt.WindowMinimizeButtonHint
                 )
             except Exception:
                 pass
@@ -335,6 +374,7 @@ def start_gui(fontlab, QtCore, QtGui):
             self.native_active_class = None
             self.native_updating = False
             self.native_checked_token = None
+            self.native_check_issue = None  # Last read-only Check failure (UI only).
             self.native_write_result = None
             self.native_write_attempted = False
             self.native_write_failed = False
@@ -468,6 +508,12 @@ def start_gui(fontlab, QtCore, QtGui):
                 QPushButton#nativeScan { background:%(primary)s;
                     color:%(onPrimary)s; font-size:13px; border-radius:15px; }
                 QPushButton#nativeScan:hover { background:%(onPrimaryContainer)s; }
+                QPushButton#glyphApply { background:%(primary)s;
+                    color:%(onPrimary)s; font-size:13px; border-radius:15px; }
+                QPushButton#glyphApply:hover:!disabled {
+                    background:%(onPrimaryContainer)s; color:%(onPrimary)s; }
+                QPushButton#glyphApply:disabled {
+                    background:%(surfaceContainerHighest)s; color:%(outline)s; }
                 QFrame#sideRail { background:%(surfaceContainerLow)s;
                     border:0; border-right:1px solid %(outlineVariant)s; }
                 QFrame#sidebarBrand { background:%(surfaceContainerLowest)s;
@@ -513,6 +559,10 @@ def start_gui(fontlab, QtCore, QtGui):
             outer = QtGui.QHBoxLayout(self)
             outer.setContentsMargins(0, 0, 0, 0)
             outer.setSpacing(0)
+            self.shell_layout = outer
+            self.compact_mode = False
+            self.restore_geometry = None
+            self._native_compact_pending = False
 
             sidebar = QtGui.QFrame()
             sidebar.setObjectName("sideRail")
@@ -563,7 +613,7 @@ def start_gui(fontlab, QtCore, QtGui):
             for index, (name, subtitle) in enumerate((
                 ("Kerning Studio", "Native + OpenType kern"),
                 ("OpenType Studio", "Features & lookups"),
-                ("Glyph Matrix", "Unicode & languages"),
+                ("Glyph Studio", "Accented alternates"),
                 ("Reports & Logs", "Checks & exports"),
             )):
                 button = QtGui.QPushButton("")
@@ -633,6 +683,7 @@ def start_gui(fontlab, QtCore, QtGui):
             runtime_col.addWidget(refresh)
             rail.addWidget(runtime)
             outer.addWidget(sidebar)
+            self.shell_sidebar = sidebar
 
             right = QtGui.QWidget()
             right_layout = QtGui.QVBoxLayout(right)
@@ -642,37 +693,130 @@ def start_gui(fontlab, QtCore, QtGui):
             self.pages = QtGui.QStackedWidget()
             self.pages.addWidget(self.kerning_studio_page())
             self.pages.addWidget(self.opentype_page())
-            self.pages.addWidget(self.glyph_matrix_page())
+            self.pages.addWidget(self.glyph_studio_modular_page())
+            # Kerning visual layout lives in a separate, optional UI module.
+            # It runs after Glyph Studio resolved its companion directory.
+            self.install_kerning_visual_layout()
             self.pages.addWidget(self.reports_page())
             right_layout.addWidget(self.pages, 1)
 
-            footer_band = QtGui.QFrame()
-            footer_band.setObjectName("footerBand")
-            footer = QtGui.QHBoxLayout(footer_band)
-            footer.setContentsMargins(16, 6, 16, 6)
+            # Status label is retained for the stable Kerning Studio handlers,
+            # but no footer is inserted into the layout: native title-bar X
+            # already closes the window. No redundant Close at the bottom.
             self.status_label = QtGui.QLabel(
                 "Font unchanged until you confirm an action. No automatic Save."
             )
-            self.status_label.setStyleSheet(
-                "color:%s;font-size:10px;" % M3_LIGHT["primary"]
-            )
-            # Technical status remains available to workflow handlers, but
-            # the user already sees status in the contextual guidance card.
-            # Avoid a second, sometimes stale sentence beside Close.
             self.status_label.setVisible(False)
-            footer.addWidget(self.status_label)
-            footer.addStretch(1)
-            close = QtGui.QPushButton("Close")
-            # PythonQt QPushButton.clicked supplies checked=False; QDialog.close
-            # accepts no arguments and rejects that boolean if connected raw.
-            close_clicked = lambda *args: self.close()
-            close.clicked.connect(close_clicked)
-            self.connections.append((close.clicked, close_clicked))
-            footer.addWidget(close)
-            right_layout.addWidget(footer_band)
+
             outer.addWidget(right, 1)
+            self.shell_right = right
+
+            # The compact UI stays visible inside FontLab, unlike native
+            # showMinimized() which becomes a barely visible icon/pill.
+            self.compact_bar = CompactBar(self)
+            self.compact_bar.setObjectName('nghiatypeCompactBar')
+            self.compact_bar.setStyleSheet(
+                'QFrame#nghiatypeCompactBar {'
+                'background:%s; border:1px solid %s; border-radius:10px;}'
+                'QLabel {color:%s;background:transparent;border:0;}' % (
+                    M3_LIGHT['surfaceContainerLowest'],
+                    M3_LIGHT['outlineVariant'], M3_LIGHT['primary']))
+            compact_row = QtGui.QHBoxLayout(self.compact_bar)
+            compact_row.setContentsMargins(14, 8, 9, 8)
+            compact_row.setSpacing(8)
+            compact_title = QtGui.QLabel('NghiaType')
+            compact_title.setFont(QtGui.QFont(self.ui_font_family, 13, QtGui.QFont.Bold))
+            compact_title.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents, True)
+            compact_row.addWidget(compact_title)
+            compact_row.addStretch(1)
+            compact_restore = QtGui.QPushButton('Restore')
+            compact_restore.setFixedWidth(86)
+            compact_restore.setToolTip('Mở lại cửa sổ NghiaType đầy đủ')
+            restore_clicked = lambda *args: self.restore_window()
+            compact_restore.clicked.connect(restore_clicked)
+            self.connections.append((compact_restore.clicked, restore_clicked))
+            compact_row.addWidget(compact_restore)
+            outer.addWidget(self.compact_bar)
+            self.compact_bar.hide()
+
             self.navigate_to(0)
             self.refresh_context()
+
+        def changeEvent(self, event):
+            """Map the native titlebar minimize to the visible compact panel.
+
+            FontLab turns a normally minimized QDialog into a tiny Windows
+            icon. Defer the restore/resize until the Qt window-state change
+            is complete so the native titlebar '-' and the compact panel
+            behave as one control.
+            """
+            QtGui.QDialog.changeEvent(self, event)
+            try:
+                is_state_change = (read_qt_value(event, 'type') ==
+                                   QtCore.QEvent.WindowStateChange)
+                is_minimized = bool(read_qt_value(self, 'isMinimized', False))
+                if (is_state_change and is_minimized and
+                        hasattr(self, 'compact_mode') and
+                        not self._native_compact_pending):
+                    self._native_compact_pending = True
+                    QtCore.QTimer.singleShot(0, self._finish_titlebar_minimize)
+            except Exception as exc:
+                # A missed native event must not break the main GUI or font.
+                try:
+                    print('NghiaType titlebar compact warning: %s: %s' % (
+                        type(exc).__name__, exc))
+                except Exception:
+                    pass
+
+        def _finish_titlebar_minimize(self):
+            self._native_compact_pending = False
+            try:
+                # Undo native minimization (tiny pill), then show our
+                # draggable NghiaType bar instead. Do not touch the font.
+                self.showNormal()
+                if not self.compact_mode:
+                    self.compact_window()
+                self.show()
+            except Exception as exc:
+                print('NghiaType compact warning: %s: %s' % (
+                    type(exc).__name__, exc))
+
+        def compact_window(self):
+            """Compact without minimizing to FontLab's tiny native window icon."""
+            if self.compact_mode:
+                return
+            rect = read_qt_value(self, 'geometry')
+            self.restore_geometry = (
+                int(read_qt_value(rect, 'x', 0)),
+                int(read_qt_value(rect, 'y', 0)),
+                int(read_qt_value(rect, 'width', 1420)),
+                int(read_qt_value(rect, 'height', 820)),
+            )
+            self.compact_mode = True
+            self.shell_sidebar.hide()
+            self.shell_right.hide()
+            self.setMinimumSize(0, 0)
+            self.compact_bar.show()
+            self.setMaximumSize(360, 92)
+            self.setMinimumSize(320, 76)
+            self.resize(340, 82)
+            self.setWindowTitle('NghiaType')
+
+        def restore_window(self):
+            if not self.compact_mode:
+                return
+            self.compact_mode = False
+            self.compact_bar.hide()
+            self.setMaximumSize(16777215, 16777215)
+            self.setMinimumSize(0, 0)
+            self.shell_sidebar.show()
+            self.shell_right.show()
+            self.setMinimumSize(1180, 650)
+            rect = self.restore_geometry
+            if rect is not None:
+                self.resize(rect[2], rect[3])
+                self.move(rect[0], rect[1])
+            self.setWindowTitle('NghiaType | ' + SHELL_VERSION)
 
         def navigate_to(self, index):
             """Sidebar navigation only; never starts a scan or applies data."""
@@ -832,7 +976,7 @@ def start_gui(fontlab, QtCore, QtGui):
             return frame
 
         def confirm_glyph_additions(self, title, details, count,
-                                    acknowledgement):
+                                    acknowledgement, action_label=None):
             """One explicit confirmation with a required tick, like the UX demo.
 
             This is UI consent only. Native/OT writers MUST still run their
@@ -918,8 +1062,10 @@ def start_gui(fontlab, QtCore, QtGui):
             actions.addStretch(1)
             cancel = QtGui.QPushButton("Cancel")
             confirm = QtGui.QPushButton(
-                "Choose backup location..." if is_opentype else
-                "Add %d glyph%s" % (count, "" if count == 1 else "s")
+                action_label if action_label else (
+                    "Choose backup location..." if is_opentype else
+                    "Add %d glyph%s" % (count, "" if count == 1 else "s")
+                )
             )
             confirm.setObjectName("nativeApply")
             confirm.setEnabled(False)
@@ -1036,6 +1182,7 @@ def start_gui(fontlab, QtCore, QtGui):
 
             workflow_band = QtGui.QFrame()
             workflow_band.setObjectName("kerningWorkflowBand")
+            self.kerning_workflow_band = workflow_band
             workflow_row = QtGui.QHBoxLayout(workflow_band)
             workflow_row.setContentsMargins(18, 10, 18, 10)
             workflow_row.setSpacing(12)
@@ -1043,6 +1190,7 @@ def start_gui(fontlab, QtCore, QtGui):
                 "kerningWorkflowSegment", M3_LIGHT["surfaceContainerLow"],
                 M3_LIGHT["outlineVariant"], 10
             )
+            self.kerning_workflow_segment = segment
             segment_row = QtGui.QHBoxLayout(segment)
             segment_row.setContentsMargins(5, 5, 5, 5)
             segment_row.setSpacing(6)
@@ -1069,6 +1217,7 @@ def start_gui(fontlab, QtCore, QtGui):
             # It explains the next action without duplicating an entire
             # Select -> Confirm -> Add progress indicator.
             guidance_wrap = QtGui.QWidget()
+            self.kerning_guidance_wrap = guidance_wrap
             guidance_wrap_layout = QtGui.QHBoxLayout(guidance_wrap)
             guidance_wrap_layout.setContentsMargins(18, 8, 18, 5)
             guidance_wrap_layout.setSpacing(0)
@@ -1147,6 +1296,36 @@ def start_gui(fontlab, QtCore, QtGui):
             ])
             self.update_kerning_tab_header(0)
             return page
+
+        def install_kerning_visual_layout(self):
+            """Load the optional visual-only Kerning companion from the module folder.
+
+            Do not block the working Native/Cross-check/OT writers when the
+            appearance module isn't installed or cannot render on PythonQt.
+            """
+            filename = "NghiaType_Kerning_Layout.py"
+            paths = [companion_script_hint(filename)]
+            glyph_dir = str(getattr(self, "_glyph_module_directory", "") or "")
+            if glyph_dir:
+                paths.append(os.path.join(glyph_dir, filename))
+            paths.append(os.path.join(os.getcwd(), filename))
+            path = next((p for p in paths if p and os.path.isfile(p)), "")
+            if not path:
+                print("Kerning UI layout optional module not found; "
+                      "retaining the original layout: " + filename)
+                return
+            try:
+                ui = load_exact_readonly_module(
+                    path, filename, "_nghiatype_kerning_layout_ui",
+                    ("install_kerning_layout",)
+                )
+                kerning_page = self.pages.widget(0)
+                ui.install_kerning_layout(
+                    self, kerning_page, read_qt_value(kerning_page, "layout"),
+                    QtCore, QtGui, M3_LIGHT
+                )
+            except Exception as exc:
+                print("Kerning UI-only layout skipped: " + str(exc))
 
         def hide_workflow_table_headers(self):
             """Hide redundant column-label strips in all three work steps.
@@ -1371,6 +1550,13 @@ def start_gui(fontlab, QtCore, QtGui):
                         "kerning classes. Nothing is changed."
                     )
                     action, next_label = "scan_native", "Scan Native classes"
+                elif self.native_check_issue is not None:
+                    kind, title = "warning", "Native check needs attention"
+                    detail = (
+                        self.native_check_issue + "  Fix the issue in FontLab, "
+                        "then run Scan again to update this list."
+                    )
+                    action, next_label = "scan_native", "Scan again"
                 elif not self.native_entries:
                     kind, title = "success", "All Native classes are complete"
                     detail = (
@@ -1526,6 +1712,12 @@ def start_gui(fontlab, QtCore, QtGui):
                         "the font."
                     )
                     action, next_label = "check_ot", "Check changes"
+            # Manual recovery from edits made in FontLab after initial Scan.
+            # Do not reuse old selection or authorization after a fresh Scan.
+            if (index == 0 and self.native_snapshot is not None and
+                    not self.native_write_failed and not self.ot_write_failed and
+                    other_action is None and action != "scan_native"):
+                other_action, other_label = "scan_native", "Scan again"
             # Match the light theme's calm, white guidance cards. Only the
             # icon and border signal attention; no off-palette blue/yellow
             # backgrounds or competing full-width success/error fills.
@@ -1822,6 +2014,7 @@ def start_gui(fontlab, QtCore, QtGui):
 
             work_area = QtGui.QWidget()
             work_area.setObjectName("nativeWorkArea")
+            self.native_work_area = work_area
             work_layout = QtGui.QVBoxLayout(work_area)
             work_layout.setContentsMargins(18, 15, 18, 12)
             work_layout.setSpacing(13)
@@ -1850,16 +2043,19 @@ def start_gui(fontlab, QtCore, QtGui):
             self.native_expand_button.setVisible(False)
 
             tables = QtGui.QHBoxLayout()
+            self.native_tables_layout = tables
             tables.setSpacing(11)
             class_panel = self.make_card(
                 "nativeClassPanel", M3_LIGHT["surfaceContainerLowest"],
                 M3_LIGHT["outlineVariant"], 15
             )
+            self.native_class_panel = class_panel
             class_col = QtGui.QVBoxLayout(class_panel)
             class_col.setContentsMargins(1, 1, 1, 1)
             class_col.setSpacing(0)
             class_head = QtGui.QFrame()
             class_head.setObjectName("nativeClassHead")
+            self.native_class_head = class_head
             class_head_layout = QtGui.QVBoxLayout(class_head)
             class_head_layout.setContentsMargins(13, 10, 13, 10)
             class_head_layout.setSpacing(5)
@@ -1914,11 +2110,13 @@ def start_gui(fontlab, QtCore, QtGui):
                 "nativeGlyphPanel", M3_LIGHT["surfaceContainerLowest"],
                 M3_LIGHT["outlineVariant"], 15
             )
+            self.native_glyph_panel = glyph_panel
             glyph_col = QtGui.QVBoxLayout(glyph_panel)
             glyph_col.setContentsMargins(1, 1, 1, 1)
             glyph_col.setSpacing(0)
             glyph_head = QtGui.QFrame()
             glyph_head.setObjectName("nativeGlyphHead")
+            self.native_glyph_head = glyph_head
             glyph_head_layout = QtGui.QVBoxLayout(glyph_head)
             glyph_head_layout.setContentsMargins(13, 10, 13, 10)
             glyph_head_layout.setSpacing(5)
@@ -2877,25 +3075,433 @@ def start_gui(fontlab, QtCore, QtGui):
             layout.addWidget(sections, 1)
             return page
 
-        def glyph_matrix_page(self):
-            """Show the future module honestly, without querying or editing font data."""
+
+        def glyph_studio_modular_page(self):
+            """Use the isolated Glyph Studio tab; leave the old implementation and Kerning untouched."""
+            filename = "NghiaType_GlyphStudio_Tab_V2.py"
+            path = companion_script_hint(filename)
+            if not path:
+                picked = QtGui.QFileDialog.getOpenFileName(
+                    self, "Locate Glyph Studio tab module", "", "Python scripts (*.py)")
+                path = picked[0] if isinstance(picked, (tuple, list)) else picked
+            if not path:
+                raise RuntimeError("Glyph Studio requires " + filename + " beside the main GUI")
+            module = load_exact_readonly_module(
+                str(path), filename, "_nghiatype_glyph_studio_tab_v2", ("create_tab",))
+            module.enable_native_minimize(self, QtCore)
+            self._glyph_module_directory = os.path.dirname(os.path.abspath(str(path)))
+            return module.create_tab(self, fontlab, QtCore, QtGui)
+
+        def glyph_studio_page(self):
+            """Unified Glyph Studio: discover -> preview -> guarded create/link."""
+            self.glyph_engine = None
+            self.glyph_plan = None
+            self.glyph_preview_path = None
+            self.glyph_preview_names = None
+            self.glyph_write_attempted = False
+            self.glyph_last_verified_apply = None  # Only set after an engine readback result.
+            self.glyph_control_updating = False
+            self.glyph_family_pairs = {}
             page = QtGui.QWidget()
-            layout = QtGui.QVBoxLayout(page)
-            layout.setContentsMargins(12, 12, 12, 12)
-            layout.setSpacing(9)
-            layout.addWidget(self.heading("Glyph Matrix / Planned"))
-            layout.addWidget(self.paragraph(
-                "A future read-only workspace for Unicode coverage, glyph sets "
-                "and consistency checks across Native and OpenType modules."
+            outer = QtGui.QVBoxLayout(page)
+            outer.setContentsMargins(24, 20, 24, 19)
+            outer.setSpacing(12)
+            outer.addWidget(self.heading('Glyph Studio | Accented Alternates', 16))
+            outer.addWidget(self.paragraph(
+                'Select an existing base and alternate. Create missing accented glyphs, '
+                'remap their component recipes, and verify readback. '
+                'Original accented glyphs are optional. No automatic Save.'
             ))
-            placeholder = QtGui.QPlainTextEdit()
-            placeholder.setReadOnly(True)
-            placeholder.setPlainText(
-                "NOT CONNECTED / no glyph scans are running here yet.\n\n"
-                "The active Native Kerning scanner remains available in module 01."
+
+            selection = self.make_card('glyphScopeBand', M3_LIGHT['surfaceContainerLow'],
+                                       M3_LIGHT['outlineVariant'], 10)
+            select_layout = QtGui.QHBoxLayout(selection)
+            select_layout.setContentsMargins(15, 12, 15, 12)
+            select_layout.setSpacing(12)
+            base_group = QtGui.QVBoxLayout()
+            base_group.addWidget(self.paragraph('BASE GLYPH'))
+            self.glyph_base_combo = QtGui.QComboBox()
+            self.glyph_base_combo.setMinimumWidth(150)
+            base_group.addWidget(self.glyph_base_combo)
+            select_layout.addLayout(base_group,1)
+            alt_group = QtGui.QVBoxLayout()
+            alt_group.addWidget(self.paragraph('ALTERNATE GLYPH'))
+            self.glyph_alt_combo = QtGui.QComboBox()
+            self.glyph_alt_combo.setMinimumWidth(180)
+            alt_group.addWidget(self.glyph_alt_combo)
+            select_layout.addLayout(alt_group,1)
+            self.glyph_refresh_button = QtGui.QPushButton('Refresh glyphs')
+            self.glyph_refresh_button.setToolTip('Read available alternate pairs in the active FontLab font')
+            select_layout.addWidget(self.glyph_refresh_button)
+            outer.addWidget(selection)
+
+            controls = QtGui.QHBoxLayout()
+            self.glyph_source_link_checkbox = QtGui.QCheckBox('Allow replacing source-linked recipes')
+            self.glyph_source_link_checkbox.setChecked(False)
+            self.glyph_source_link_checkbox.setToolTip(
+                'Only existing target recipes that directly link the source glyph. '
+                'Custom drawn recipes remain protected.'
             )
-            layout.addWidget(placeholder, 1)
+            controls.addWidget(self.glyph_source_link_checkbox)
+            self.glyph_create_sources_checkbox = QtGui.QCheckBox('Also create missing source glyphs')
+            self.glyph_create_sources_checkbox.setChecked(False)
+            self.glyph_create_sources_checkbox.setToolTip(
+                'OFF (recommended): create accented ALTERNATES directly from the catalog recipe. '
+                'Original accented source glyphs are not required or changed. '
+                'ON: also create missing original accented source glyphs; source base anchors must exist.'
+            )
+            controls.addWidget(self.glyph_create_sources_checkbox)
+            controls.addStretch(1)
+            outer.addLayout(controls)
+
+            bar = QtGui.QHBoxLayout()
+            self.glyph_preview_button = QtGui.QPushButton('Scan & Preview')
+            self.glyph_preview_button.setObjectName('nativeScan')
+            self.glyph_apply_button = QtGui.QPushButton('Apply...')
+            self.glyph_apply_button.setObjectName('glyphApply')
+            self.glyph_apply_button.setEnabled(False)
+            self.glyph_apply_button.setToolTip('Scan & Preview to see pending alternate glyphs.')
+            self.glyph_copy_button = QtGui.QPushButton('Copy Glyphtext')
+            bar.addWidget(self.glyph_preview_button)
+            bar.addWidget(self.glyph_apply_button)
+            bar.addStretch(1)
+            bar.addWidget(self.glyph_copy_button)
+            outer.addLayout(bar)
+
+            self.glyph_notice = self.paragraph(
+                'Choose a base/alternate pair, then Scan & Preview. Scan never changes the font.'
+            )
+            self.glyph_notice.setWordWrap(True)
+            self.glyph_notice.setStyleSheet(
+                'color:%s;background:%s;border:1px solid %s;'
+                'border-radius:8px;padding:11px 13px;' % (
+                    M3_LIGHT['onSurface'], M3_LIGHT['surfaceContainerLow'],
+                    M3_LIGHT['outlineVariant'])
+            )
+            outer.addWidget(self.glyph_notice)
+            self.glyph_table = QtGui.QTreeWidget()
+            self.glyph_table.setColumnCount(4)
+            self.glyph_table.setHeaderLabels(['Source glyph', 'Alternate', 'Proposed recipe', 'Action'])
+            self.glyph_table.setRootIsDecorated(False)
+            self.glyph_table.setAlternatingRowColors(True)
+            self.configure_tree_columns(self.glyph_table,[170,210,370,220],(2,))
+            outer.addWidget(self.glyph_table,2)
+            self.glyph_log = QtGui.QPlainTextEdit()
+            self.glyph_log.setReadOnly(True)
+            self.glyph_log.setPlainText(
+                'Unified Glyph Studio | Creates accented alternate glyphs directly. '
+                'Optional: create original accented glyphs too. Existing drawings/recipes are protected. '
+                'No automatic Save.'
+            )
+            self.glyph_log.setMinimumHeight(95)
+            outer.addWidget(self.glyph_log,1)
+
+            base_changed = lambda *args: self.on_glyph_base_changed()
+            alt_changed = lambda *args: self.invalidate_glyph_preview()
+            refresh_clicked = lambda *args: self.safe_glyph(self.refresh_glyph_families)
+            preview_clicked = lambda *args: self.safe_glyph(self.scan_glyph_batch)
+            apply_clicked = lambda *args: self.safe_glyph(self.apply_glyph_batch)
+            copy_clicked = lambda *args: self.safe_glyph(self.copy_glyphtext)
+            source_changed = lambda *args: self.invalidate_glyph_preview()
+            for signal,callback in (
+                (self.glyph_base_combo.currentIndexChanged,base_changed),
+                (self.glyph_alt_combo.currentIndexChanged,alt_changed),
+                (self.glyph_refresh_button.clicked,refresh_clicked),
+                (self.glyph_preview_button.clicked,preview_clicked),
+                (self.glyph_apply_button.clicked,apply_clicked),
+                (self.glyph_copy_button.clicked,copy_clicked),
+                (self.glyph_source_link_checkbox.toggled,source_changed),
+                (self.glyph_create_sources_checkbox.toggled,source_changed),
+            ):
+                signal.connect(callback)
+                self.connections.append((signal,callback))
+            self.refresh_glyph_families()
             return page
+
+        def invalidate_glyph_preview(self):
+            if getattr(self,'glyph_control_updating',False):
+                return
+            self.glyph_plan = None
+            self.glyph_apply_button.setEnabled(False)
+            self.glyph_notice.setText('Selection changed. Scan & Preview again before applying.')
+
+        def refresh_glyph_families(self):
+            font=fontlab.CurrentFont()
+            if font is None:
+                names=set()
+            else:
+                names=set(str(g.name) for g in font.glyphs)
+            mapping={}
+            # Never invent an alternate. Only list actual BASE and BASE.<suffix> pairs.
+            for name in names:
+                if '.' not in name: continue
+                base,suffix=name.split('.',1)
+                if not base or base not in names or not suffix: continue
+                if re.match(r'^(?:[0-9]{3}|ss[0-9]{2})$',suffix,re.I):
+                    mapping.setdefault(base,[]).append(name)
+            old_base=str(read_qt_value(self.glyph_base_combo, 'currentText', '') or '')
+            old_alt=str(read_qt_value(self.glyph_alt_combo, 'currentText', '') or '')
+            self.glyph_family_pairs={k:sorted(set(v)) for k,v in mapping.items()}
+            bases=sorted(mapping,key=lambda n:(n.casefold(),n))
+            self.glyph_control_updating=True
+            try:
+                self.glyph_base_combo.clear()
+                for b in bases: self.glyph_base_combo.addItem(b)
+                selected=old_base if old_base in bases else ('E' if 'E' in bases else ('A' if 'A' in bases else (bases[0] if bases else '')))
+                if selected:
+                    self.glyph_base_combo.setCurrentIndex(bases.index(selected))
+                self._repopulate_glyph_alternates(selected,old_alt)
+            finally:
+                self.glyph_control_updating=False
+            self.invalidate_glyph_preview()
+            if not bases:
+                self.glyph_notice.setText('No existing base + alternate pair found. Create an alternate base in FontLab, then Refresh glyphs.')
+            else:
+                self.glyph_notice.setText('Found %d base families. Select a pair and Scan & Preview.' % len(bases))
+
+        def _repopulate_glyph_alternates(self,base,preferred=''):
+            alts=self.glyph_family_pairs.get(base,[])
+            self.glyph_alt_combo.clear()
+            for alt in alts: self.glyph_alt_combo.addItem(alt)
+            if alts:
+                selected=preferred if preferred in alts else alts[0]
+                self.glyph_alt_combo.setCurrentIndex(alts.index(selected))
+
+        def on_glyph_base_changed(self):
+            if self.glyph_control_updating: return
+            self.glyph_control_updating=True
+            try:
+                self._repopulate_glyph_alternates(str(read_qt_value(self.glyph_base_combo, 'currentText', '') or ''))
+            finally:
+                self.glyph_control_updating=False
+            self.invalidate_glyph_preview()
+
+        def safe_glyph(self, action):
+            try:
+                action()
+            except Exception:
+                trace = traceback.format_exc()
+                print('NGHIATYPE GLYPH STUDIO ERROR:\n' + trace)
+                self.glyph_plan = None
+                self.glyph_apply_button.setEnabled(False)
+                verified = getattr(self, 'glyph_last_verified_apply', None)
+                if verified is not None and verified.get('ok') is True:
+                    self.glyph_notice.setText(
+                        'Glyph creation PASS, but GUI display had an error. Scan again to refresh.')
+                    self.glyph_log.setPlainText(str(verified.get('log', '')) +
+                        '\nGUI DISPLAY ERROR:\n' + trace[-4000:])
+                else:
+                    self.glyph_notice.setText(
+                        'Operation stopped. See log; Scan again to continue. '
+                        'If a glyph was left incomplete, review it manually.')
+                    self.glyph_log.setPlainText(trace[-8000:])
+                self.glyph_write_attempted = False
+
+        def get_glyph_engine(self):
+            if self.glyph_engine is not None:
+                return self.glyph_engine
+            path=companion_script_hint(GLYPH_ENGINE_FILENAME)
+            if not path:
+                chosen=QtGui.QFileDialog.getOpenFileName(
+                    self,'Select Unified Glyph Studio engine','', 'Python scripts (*.py)'
+                )
+                if isinstance(chosen,(tuple,list)): chosen=chosen[0]
+                path=str(chosen or '').strip()
+            if not path:
+                raise RuntimeError('Missing '+GLYPH_ENGINE_FILENAME+'. Keep it beside this GUI file.')
+            module=load_exact_readonly_module(
+                path, GLYPH_ENGINE_FILENAME, '_nghiatype_glyph_unified_ui',
+                ('gui_preview','gui_apply','gui_audit_partial_resume','snapshot','inventory','plan_family')
+            )
+            self.glyph_engine=module
+            return module
+
+        def scan_glyph_batch(self):
+            self.glyph_last_verified_apply=None
+            self.glyph_plan=None
+            self.glyph_apply_button.setEnabled(False)
+            self.glyph_table.clear()
+            base=str(read_qt_value(self.glyph_base_combo, 'currentText', '') or '')
+            alt=str(read_qt_value(self.glyph_alt_combo, 'currentText', '') or '')
+            if not base or not alt:
+                self.glyph_notice.setText('Choose an existing base and alternate glyph first.')
+                return
+            core=self.get_glyph_engine()
+            plan=core.gui_preview([(base,alt)],
+                allow_source_link=bool(read_qt_value(self.glyph_source_link_checkbox,'isChecked',False)),
+                create_sources=bool(read_qt_value(self.glyph_create_sources_checkbox,'isChecked',False)))
+            self.glyph_plan=plan
+            counts={}
+            for r in plan['rows']:
+                state=r['status']
+                counts[state]=counts.get(state,0)+1
+                display={
+                    'CREATE_TARGET':'Create source + target' if r.get('create_source') else 'Create alternate',
+                    'FILL_BLANK':'Fill blank recipe',
+                    'SOURCE_LINK':'Replace source link' if plan['allow_source_link'] else 'Source link (protected)',
+                    'MATCHING':'Already linked',
+                    'COMPONENTS_MATCH':'Components match (alias)',
+                    'REVIEW':'Review manually',
+                }.get(state,state)
+                item=QtGui.QTreeWidgetItem([r['source'],r['target'],r['proposal'],display])
+                item.setToolTip(3,str(r.get('reason','') or display))
+                item.setToolTip(2,str(r.get('proposal','')))
+                self.glyph_table.addTopLevelItem(item)
+            needed=plan['eligible']
+            total=len(plan['rows'])
+            review=counts.get('REVIEW',0)
+            matched=counts.get('MATCHING',0)+counts.get('COMPONENTS_MATCH',0)
+            self.glyph_notice.setText(
+                '%d accented targets | %d ready to create/link | %d already correct | '
+                '%d review. %s No font changes.' % (
+                    total,needed,matched,review,
+                    'Preview complete.')
+            )
+            log_text=(
+                'READ ONLY | %s -> %s | %s\n' % (base,alt,plan['filename'])+
+                '\n'.join('%s | %s | %s => %s%s' % (
+                    r['target'],r['status'],repr(r['old']),repr(r['proposal']),
+                    ' | '+r['reason'] if r.get('reason') else '') for r in plan['rows'])
+            )
+            self.glyph_log.setPlainText(log_text)
+            self.glyph_apply_button.setText('Apply %d target%s...' % (needed,'' if needed==1 else 's'))
+            # Every Scan is a fresh plan. Previous Apply errors cannot lock future work.
+            can_apply = needed > 0
+            self.glyph_apply_button.setEnabled(can_apply)
+            self.glyph_apply_button.setToolTip(
+                'Create or update the %d pending alternate glyph(s). No automatic Save.' % needed
+                if can_apply else 'All eligible glyphs already match, or need manual review.')
+
+        def refresh_fontlab_glyph_view(self):
+            """Notify FontLab that its glyph LIST changed, not just outlines.
+
+            Update()/UpdateAll() alone refresh previews, but in FL8 the Font
+            Window chart may keep the old encoding until the user switches
+            encodings. notifyPackageContentUpdated(package.id) is the proper
+            FontLab notification for a changed glyph inventory. It does not
+            change the selected encoding and does not Save the font.
+
+            Return (content_notified, notes). A UI notification failure must
+            never retroactively mark a successfully built recipe as failed.
+            """
+            notes = []
+            notified = False
+            font = None
+            pkg = None
+            try:
+                font = fontlab.CurrentFont()
+                if font is not None:
+                    pkg = fontlab.flPackage(font)
+            except Exception as exc:
+                notes.append('font reference: %s: %s' % (type(exc).__name__, exc))
+
+            items = getattr(fontlab, 'flItems', None)
+            if items is not None and pkg is not None:
+                # FontLab's flPackage ID, not a Unicode value/glyph index.
+                package_id = read_qt_value(pkg, 'id', None)
+                if isinstance(package_id, int) and not isinstance(package_id, bool) and package_id >= 0:
+                    content_cb = getattr(items, 'notifyPackageContentUpdated', None)
+                    if callable(content_cb):
+                        try:
+                            content_cb(package_id)
+                            notified = True
+                        except Exception as exc:
+                            notes.append('notifyPackageContentUpdated: %s: %s' % (
+                                type(exc).__name__, exc))
+                    else:
+                        notes.append('notifyPackageContentUpdated unavailable')
+                else:
+                    notes.append('flPackage.id unavailable')
+                package_cb = getattr(items, 'notifyPackageUpdated', None)
+                if callable(package_cb):
+                    try:
+                        package_cb(pkg)
+                    except Exception as exc:
+                        notes.append('notifyPackageUpdated: %s: %s' % (
+                            type(exc).__name__, exc))
+            else:
+                notes.append('flItems or active package unavailable')
+
+            # Keep preview updates, but target the ACTUAL font when possible.
+            update = getattr(fontlab, 'Update', None)
+            if callable(update):
+                try:
+                    if font is not None:
+                        update(font)
+                    else:
+                        update()
+                except Exception as exc:
+                    notes.append('Update: %s: %s' % (type(exc).__name__, exc))
+            update_all = getattr(fontlab, 'UpdateAll', None)
+            if callable(update_all):
+                try:
+                    update_all()
+                except Exception as exc:
+                    notes.append('UpdateAll: %s: %s' % (type(exc).__name__, exc))
+            return notified, '; '.join(notes)
+
+        def apply_glyph_batch(self):
+            plan = self.glyph_plan
+            if not plan:
+                raise RuntimeError('Scan & Preview before Apply.')
+            if not plan['eligible']:
+                self.glyph_notice.setText('Nothing to create or remap.')
+                return
+            base = str(read_qt_value(self.glyph_base_combo, 'currentText', '') or '')
+            alt = str(read_qt_value(self.glyph_alt_combo, 'currentText', '') or '')
+            if (plan['families'] != [(base, alt)] or
+                plan['allow_source_link'] != bool(read_qt_value(self.glyph_source_link_checkbox, 'isChecked', False)) or
+                plan['create_sources'] != bool(read_qt_value(self.glyph_create_sources_checkbox, 'isChecked', False))):
+                raise RuntimeError('Selection changed. Scan again.')
+            # Apply button is explicit user consent; no additional checkbox dialog.
+            # Engine rechecks font/recipes immediately before writing and will
+            # preserve manually drawn glyphs and custom recipes.
+            self.glyph_apply_button.setEnabled(False)
+            self.glyph_write_attempted = True
+            self.glyph_last_verified_apply = None
+            result = self.get_glyph_engine().gui_apply(plan)
+            self.glyph_last_verified_apply = result if result.get('ok') is True else None
+            self.glyph_write_attempted = False
+            self.glyph_plan = None  # A new Scan always builds a fresh plan.
+            # Sync FontLab's Font Window after a real write so users do not
+            # need to hit Refresh Font manually. Keep recipe PASS independent
+            # of any optional UI refresh failure.
+            chart_notified, refresh_note = self.refresh_fontlab_glyph_view()
+            self.glyph_log.setPlainText(
+                str(result.get('log', '')) + '\n' +
+                ('FontLab notified: font glyph list changed; chart update requested.'
+                 if chart_notified else
+                 'FontLab chart notification not confirmed; see details.') +
+                (' Details: ' + refresh_note if refresh_note else '')
+            )
+            count = int(read_qt_value(self.glyph_table, 'topLevelItemCount', 0) or 0)
+            if result.get('ok'):
+                for i in range(count):
+                    item = self.glyph_table.topLevelItem(i)
+                    if item is not None and str(item.text(3)).startswith(('Create', 'Fill', 'Replace')):
+                        item.setText(3, 'Created (unsaved)')
+                self.glyph_notice.setText(
+                    'Done: %d/%d targets verified. Font Window update requested; not saved. '
+                    'Check glyph placement, then Scan another family.' %
+                    (result['partial'], result['expected']))
+            else:
+                self.glyph_notice.setText(
+                    '%d/%d targets completed before an error. Check the log, then Scan again to continue. '
+                    'Review any incomplete glyph before saving.' %
+                    (result['partial'], result['expected']))
+            self.glyph_apply_button.setToolTip('Scan again to refresh the remaining targets.')
+
+        def copy_glyphtext(self):
+            chosen=read_qt_value(self.glyph_table,'selectedItems',[]) or []
+            if not chosen:
+                self.glyph_notice.setText('Select glyph rows, then Copy Glyphtext.')
+                return
+            expression=''.join('/'+str(item.text(1)) for item in chosen)
+            clipboard=read_qt_value(QtGui.QApplication,'clipboard')
+            if clipboard is None:
+                raise RuntimeError('Qt clipboard unavailable')
+            clipboard.setText(expression)
+            self.glyph_notice.setText('Copied Glyphtext: '+expression+' | Paste in FontLab Text/Preview.')
 
         def reports_page(self):
             page = QtGui.QWidget()
@@ -4283,6 +4889,7 @@ def start_gui(fontlab, QtCore, QtGui):
             self.native_snapshot = None
             self.native_preview = None
             self.native_checked_token = None
+            self.native_check_issue = None
             self.native_check_button.setEnabled(False)
             self.native_apply_button.setEnabled(False)
             self.native_apply_badge.setText("CHECK FIRST")
@@ -4679,6 +5286,7 @@ def start_gui(fontlab, QtCore, QtGui):
             )
 
         def refresh_native_preview(self):
+            self.native_check_issue = None
             self.native_preview = None
             self.native_checked_token = None
             self.native_apply_button.setEnabled(False)
@@ -4768,6 +5376,19 @@ def start_gui(fontlab, QtCore, QtGui):
             live, blockers = self.native_live_safety_check()
             if blockers:
                 self.set_native_selection_locked(False)
+                # Snapshot issues are only summarized here; full technical
+                # details stay in Report. Never interpret this as permission
+                # to ignore the backend's global safety blockers.
+                first_issue = next(
+                    (str(issue) for issue in
+                     (self.native_preview or {}).get("issues", ())
+                     if str(issue).startswith("Missing glyphs in class ")),
+                    None
+                )
+                self.native_check_issue = (
+                    first_issue if first_issue is not None else
+                    str(blockers[0])
+                )[:320]
                 reason = "; ".join(str(issue) for issue in blockers[:3])
                 self.native_apply_badge.setText("NEEDS ATTENTION")
                 self.native_apply_note.setText(
@@ -4783,9 +5404,11 @@ def start_gui(fontlab, QtCore, QtGui):
                 self.status_label.setText(
                     "Native check found an issue. Nothing was added."
                 )
+                self.refresh_kerning_guidance()
                 return False
             if live is None:
                 raise RuntimeError("Native check returned no live font snapshot.")
+            self.native_check_issue = None
             self.native_checked_token = self.native_preview["token"]
             self.native_apply_button.setEnabled(True)
             self.set_native_selection_locked(True)
