@@ -4,6 +4,50 @@ This log records the Kerning Studio milestones, release-level changes, and safet
 
 Tài liệu ghi lại những cột mốc phát triển Kerning Studio, thay đổi theo từng phiên bản và các nguyên tắc an toàn. Đọc cùng với [README.md](README.md) để có đầy đủ bối cảnh.
 
+## 23 November 2026 — Glyph Studio 1.9.5 UI milestone / 23.11.2026
+
+**Status: Glyph Studio UI/UX provisionally approved in FontLab 8; wider engine coverage still requires real-font validation.**  
+**Trạng thái: Tạm chốt giao diện và workflow Glyph Studio trên FontLab 8; chưa xem toàn bộ khả năng của engine là đã kiểm chứng.**
+
+### Completed today / Kết quả hôm nay
+
+- Separated **Glyph Studio tab UI** (`NghiaType_GlyphStudio_Tab_V2.py`) from **Glyph Studio engine** (`NghiaType_GlyphStudio_Engine_V2.py`), with one main GUI entry point. Existing Kerning Studio logic was retained.  
+  Tách **UI của tab Glyph Studio** khỏi **engine Glyph Studio**, giữ một GUI chính và không viết lại logic Kerning Studio đã hoạt động.
+- Refined the visual system against an **interactive HTML reference** and screenshots from FontLab 8: compact mode tabs, balanced controls, native/system icons, cleaner family rows, aligned dropdowns and buttons, and consistent sizing with Kerning Studio.  
+  Tinh chỉnh giao diện theo **HTML tương tác** và ảnh chụp FontLab 8: chuyển chế độ gọn, nút đồng đều, icon hệ thống, danh sách family rõ ràng, đồng bộ kích thước với Kerning Studio.
+- Made **Scan → review/select → Apply** easier to understand: show a useful empty state before selection, distinguish pre-scan from completed results, show actionable targets, and report **All set** only when the scan finds no pending or review items.  
+  Làm rõ luồng **Scan → xem/chọn → Apply**: hướng dẫn khi chưa chọn family, phân biệt trạng thái chưa quét với đã hoàn tất, tập trung vào target cần xử lý; chỉ báo **All set** khi đã quét và không còn mục cần tạo hoặc xem lại.
+- Improved the display of already-matching recipes and the explanation of **REVIEW** results, including potential recipe aliases such as `dotbelow` / `dotbelowcomb`.  
+  Cải thiện cách nhận diện và giải thích recipe đã khớp hoặc cần xem lại, gồm những tên mark có thể là alias như `dotbelow` / `dotbelowcomb`.
+- Added or expanded code paths for **Base Diacritics**, language-group recipe proposals, mark-style choices (`.case`/standard), selectable targets, and multi-family planning. These are implementation milestones, not a claim of full FontLab runtime coverage.  
+  Bổ sung/mở rộng mã cho **Base Diacritics**, nhóm ngôn ngữ, cách chọn mark (`.case`/standard), chọn target và multi-family; chưa xem đây là chứng nhận tương thích toàn bộ trên FontLab.
+- Added an optional **Kerning visual layout companion** (`NghiaType_Kerning_Layout.py`) so the existing Kerning workflow can share the Glyph Studio visual language without rewriting its writer.  
+  Thêm module **Kerning Layout** chỉ phụ trách trình bày để giao diện đồng bộ, không viết lại writer Kerning.
+
+### Verification and boundaries / Kiểm chứng và giới hạn
+
+- The user reviewed the evolving UI directly in **FontLab 8**, and accepted the compact mode tabs and overall visual direction.  
+  Giao diện đã được xem và tinh chỉnh trực tiếp trong **FontLab 8**; đã tạm thống nhất bố cục và định hướng chung.
+- Earlier **Glyph Studio Alpha 09** successfully created 22 E/E.001-related glyphs with readback PASS for 11/11 targets. This is earlier verified evidence, not a new end-to-end test of all features today.  
+  Kết quả đã có từ **Alpha 09**: tạo 22 glyph liên quan nhóm E/E.001, readback PASS 11/11 target; không đồng nghĩa mọi chức năng mới đều đã kiểm chứng.
+- FontLab runtime behavior for multi-master, all languages/aliases, mark placement, UI repaint after Apply, and every new engine branch remains to be confirmed where relevant.  
+  Còn cần xác minh những trường hợp multi-master, các nhóm ngôn ngữ/alias, vị trí dấu, cập nhật Font Window và các nhánh engine mới khi sử dụng thực tế.
+- No automatic Save/Compile. Preserve existing hand-drawn glyphs, avoid arbitrary Apply locks, and allow users to rescan after partial operations.  
+  Không tự Save/Compile; tôn trọng glyph đã vẽ tay, tránh khóa Apply vô lý, cho phép quét lại để tiếp tục sau thao tác một phần.
+- Keep stable modules and historical `.py` files unchanged for now; reorganize into `modules/<feature>/` only after the features stabilize.  
+  Chưa dọn hoặc thay đổi các module/file cũ đã ổn định; chỉ tổ chức lại thành thư mục module khi các tính năng đã vững.
+
+### Next / Việc tiếp theo
+
+- Prioritize **OpenType Studio**: clear feature/class inspection, missing/extra glyph detection, ordering and references, then a practical editing workflow.  
+  Ưu tiên **OpenType Studio**: đọc class/feature trực quan, tìm glyph thiếu/thừa, kiểm tra thứ tự và tham chiếu, sau đó mới mở rộng thao tác sửa.
+- Later revisit existing modules for broader glyph/recipe support and **Specific-first Native Kerning** proposals. The Specific-first rules are ideas under review, **not implemented or released yet**.  
+  Sau đó mở rộng hỗ trợ recipe/glyph và cân nhắc **Specific-first Native Kerning**; đây mới là đề xuất, **chưa phải chức năng đã triển khai**.
+- When shipping a stable release, use a clear main entry point such as `NghiaType_1.9.5.py`; companion filenames remain as expected by imports.  
+  Khi phát hành ổn định, dùng tên file GUI chính đơn giản như `NghiaType_1.9.5.py`; giữ đúng tên các module mà GUI import.
+
+---
+
 ## 1.9.5 — 20 November 2026 / 20.11.2026
 
 **Status: Kerning Studio workflow finalized.**  
